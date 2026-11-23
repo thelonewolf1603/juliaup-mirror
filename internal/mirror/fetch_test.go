@@ -56,7 +56,7 @@ func TestDownloadLeavesNothingOnTruncatedBody(t *testing.T) {
 	defer srv.Close()
 	dest := filepath.Join(t.TempDir(), "a", "file")
 	f := &Fetcher{Client: http.DefaultClient, Retries: 0, Backoff: time.Millisecond}
-	if err := f.Download(context.Background(), srv.URL, dest); err == nil {
+	if err := f.Download(context.Background(), srv.URL, dest, ""); err == nil {
 		t.Fatal("want error")
 	}
 	entries, _ := os.ReadDir(filepath.Dir(dest))

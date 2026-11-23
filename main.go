@@ -20,7 +20,8 @@ const usage = `juliaup-mirror builds a static mirror of the juliaup server.
 
 Usage:
   juliaup-mirror sync  [flags]   download or update the mirror
-  juliaup-mirror serve [flags]   serve a mirror directory over HTTP (for testing)
+  juliaup-mirror verify [flags]  check a mirror's Julia archives against their SHA256
+  juliaup-mirror serve [flags]   serve a mirror directory over HTTP(S)
 
 Clients use the mirror with:
   export JULIAUP_SERVER=https://mirror.example.com/juliaup-mirror
@@ -41,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "sync":
 		err = runSync(ctx, os.Args[2:])
+	case "verify":
+		err = runVerify(os.Args[2:])
 	case "serve":
 		err = runServe(os.Args[2:])
 	case "-h", "--help", "help":
@@ -66,6 +69,7 @@ func runSync(ctx context.Context, args []string) error {
 	installScript := fl.String("install-script-url", mirror.DefaultInstallScriptURL, "source of juliaup's install script ({VERSION} is replaced)")
 	dmg := fl.Bool("macos-dmg", false, "also mirror the macOS .dmg archives juliaup tries first")
 	metadataOnly := fl.Bool("metadata-only", false, "skip Julia archives (when a caching proxy serves bin/)")
+	skipChecksums := fl.Bool("skip-checksums", false, "do not check Julia archives against the upstream's bin/versions.json")
 	prune := fl.Bool("prune", false, "delete archives and juliaup binaries the mirror no longer lists")
 	dryRun := fl.Bool("dry-run", false, "show what would be downloaded and how big it is")
 	jobs := fl.Int("jobs", 4, "parallel downloads")
@@ -92,6 +96,7 @@ func runSync(ctx context.Context, args []string) error {
 		InstallScriptURL: *installScript,
 		MacOSDmg:         *dmg,
 		MetadataOnly:     *metadataOnly,
+		SkipChecksums:    *skipChecksums,
 		Prune:            *prune,
 		DryRun:           *dryRun,
 		Jobs:             *jobs,
@@ -115,6 +120,27 @@ func printSummary(r *mirror.Result, dryRun bool) {
 		return
 	}
 	fmt.Printf("%d files listed, %d downloaded (%s), %d pruned\n", r.Files, r.Downloaded, humanBytes(r.DownloadedBytes), r.Pruned)
+	if r.Unverified > 0 {
+		fmt.Printf("%d archives have no published SHA256 and were not verified\n", r.Unverified)
+	}
+}
+
+func runVerify(args []string) error {
+	fl := flag.NewFlagSet("verify", flag.ExitOnError)
+	dir := fl.String("dir", "", "mirror directory (required)")
+	_ = fl.Parse(args)
+	if *dir == "" {
+		return errors.New("-dir is required")
+	}
+	res, err := mirror.Verify(*dir, log.Printf)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d archives OK, %d mismatched, %d without a published hash\n", res.OK, res.Bad, res.Unknown)
+	if res.Bad > 0 {
+		return fmt.Errorf("%d archives do not match their SHA256", res.Bad)
+	}
+	return nil
 }
 
 func runServe(args []string) error {

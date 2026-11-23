@@ -47,6 +47,7 @@ Serve the mirror over **https**: juliaup accepts plain `http://` only for localh
 | `-arch-variants` | off | Also mirror the `~x86` / `~x64` variants of each channel (e.g. 32-bit Julia on a 64-bit host). |
 | `-juliaup-version` | upstream's current release | The juliaup release clients install and self-update to. |
 | `-macos-dmg` | off | Also mirror the `.dmg` juliaup tries before the `.tar.gz` on macOS. |
+| `-skip-checksums` | off | Don't check Julia archives against the SHA256 hashes in the upstream's `bin/versions.json`. |
 | `-metadata-only` | off | Skip Julia archives, e.g. when a caching proxy in front of the mirror fetches `bin/` from upstream. |
 
 On Linux, juliaup's install script always installs the **musl** juliaup, which reads the `*-linux-musl` version database. Mirror both `-linux-musl` and `-linux-gnu` targets; they point at the same Julia archives, so the musl target costs only a few MB. Likewise on Windows, the MSI installs the `-pc-windows-gnu` juliaup and the Store build is `-pc-windows-msvc`.
@@ -80,6 +81,14 @@ A mirror can be the `-upstream` of another one (say, an internet-facing mirror f
 
 **Side effect:** mirror numbers sort above any realistic official number, so a client that stops using the mirror keeps the mirror's channel list. Delete `~/.julia/juliaup/versiondb-*.json` on that client after unsetting `JULIAUP_SERVER`.
 
+### Checksums
+
+Julia's `bin/versions.json` lists a SHA256 for every release archive. `sync` downloads it, checks each archive as it arrives (a mismatch is retried, then fails the sync before anything is published), and copies `versions.json` into the mirror so a mirror of this mirror can check too.
+
+`juliaup-mirror verify -dir /srv/julia` rechecks every archive in a mirror. Run it on the air-gapped side after copying the mirror across, or from cron to catch disk corruption.
+
+The juliaup binaries themselves have no published hashes yet; juliaup PRs #1456 and #1457 propose them.
+
 ### Pruning
 
 The current and the previous version databases are kept; older ones are removed. With `-prune`, Julia archives and juliaup binaries that neither of those two lists are deleted too, so a client that fetched the previous database a moment ago can still install from it.
@@ -90,7 +99,7 @@ A sync holds a lock on the mirror directory, so overlapping cron runs fail fast 
 
 - Nightly and PR builds (`nightly`, `pr1234`). juliaup fetches them from separate URLs that this tool does not mirror.
 - A Windows install script. Windows users can set `JULIAUP_SERVER` and use the mirrored MSI from `juliaup/winmsi/`.
-- Signature or checksum checks of downloaded archives.
+- Checksums for the juliaup binaries (none are published yet).
 
 ## Development
 

@@ -81,6 +81,9 @@ type Config struct {
 	MacOSDmg bool
 	// MetadataOnly skips Julia archives, e.g. when a caching proxy serves bin/.
 	MetadataOnly bool
+	// SkipChecksums does not check Julia archives against the upstream's
+	// bin/versions.json.
+	SkipChecksums bool
 	// Prune deletes archives and juliaup binaries that neither the current
 	// nor the previous versiondb lists.
 	Prune  bool
@@ -95,8 +98,10 @@ type Result struct {
 	DBVersion         string
 	JuliaupVersion    string
 	Files             int
-	Downloaded        int
-	DownloadedBytes   int64
+	// Unverified counts listed archives the upstream publishes no hash for.
+	Unverified      int
+	Downloaded      int
+	DownloadedBytes int64
 	// MissingBytes is the size still to download (dry run only); -1 if unknown.
 	MissingBytes int64
 	Pruned       int
@@ -115,6 +120,7 @@ type state struct {
 type file struct {
 	rel      string
 	url      string
+	sha256   string
 	optional bool
 }
 
@@ -122,6 +128,8 @@ type upstreamData struct {
 	dbVersion      DBVersion
 	juliaupVersion string
 	dbs            map[string]*VersionDB
+	versionsJSON   []byte
+	sums           Checksums
 }
 
 // Sync updates the mirror in cfg.Out.
@@ -151,6 +159,10 @@ func Sync(ctx context.Context, f *Fetcher, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	unverified := addChecksums(files, upd.sums)
+	if unverified > 0 && !cfg.SkipChecksums {
+		cfg.Logf("warning: %d archives have no published hash and will not be verified", unverified)
+	}
 
 	prev, err := loadState(cfg.Out)
 	if err != nil {
@@ -178,6 +190,7 @@ func Sync(ctx context.Context, f *Fetcher, cfg Config) (*Result, error) {
 		DBVersion:         next.DBVersion,
 		JuliaupVersion:    upd.juliaupVersion,
 		Files:             len(files),
+		Unverified:        unverified,
 	}
 	missing := missingFiles(cfg.Out, files)
 
@@ -251,6 +264,21 @@ func fetchUpstream(ctx context.Context, f *Fetcher, cfg Config) (*upstreamData, 
 		return nil, fmt.Errorf("juliaup version %.40q is not major.minor.patch", upd.juliaupVersion)
 	}
 	cfg.Logf("upstream versiondb %s, juliaup %s", upd.dbVersion, upd.juliaupVersion)
+
+	if !cfg.SkipChecksums && !cfg.MetadataOnly {
+		data, err := f.Get(ctx, cfg.upstreamURL(versionsJSON))
+		switch {
+		case errors.Is(err, ErrNotFound):
+			cfg.Logf("warning: upstream has no %s; archives will not be verified", versionsJSON)
+		case err != nil:
+			return nil, err
+		default:
+			if upd.sums, err = ParseChecksums(data); err != nil {
+				return nil, err
+			}
+			upd.versionsJSON = data
+		}
+	}
 
 	matched := map[string]bool{}
 	for _, t := range cfg.Targets {
@@ -425,6 +453,23 @@ func nextState(prev state, published DBVersion, upd *upstreamData, hash string) 
 	return next, nil
 }
 
+// addChecksums sets the expected hash of every archive in files and returns
+// how many archives have none.
+func addChecksums(files []file, sums Checksums) int {
+	unverified := 0
+	for i := range files {
+		if !strings.HasPrefix(files[i].rel, "bin/") {
+			continue
+		}
+		if sum, ok := sums[files[i].rel]; ok {
+			files[i].sha256 = sum
+		} else {
+			unverified++
+		}
+	}
+	return unverified
+}
+
 func missingFiles(root string, files []file) []file {
 	var missing []file
 	for _, fl := range files {
@@ -455,7 +500,7 @@ func download(ctx context.Context, f *Fetcher, cfg Config, files []file) (int, i
 					continue
 				}
 				dest := filepath.Join(cfg.Out, filepath.FromSlash(fl.rel))
-				err := f.Download(ctx, fl.url, dest)
+				err := f.Download(ctx, fl.url, dest, fl.sha256)
 				mu.Lock()
 				switch {
 				case err == nil:
@@ -514,6 +559,12 @@ func sizeOf(ctx context.Context, f *Fetcher, files []file, cfg Config) int64 {
 // the *DBVERSION pointers go last, after the versiondb files they name, so a
 // client never sees a versiondb whose files are missing.
 func publish(ctx context.Context, f *Fetcher, cfg Config, upd *upstreamData, next state) error {
+	if upd.versionsJSON != nil {
+		// So a mirror of this mirror, and Verify, can check the archives.
+		if err := writeFile(cfg.Out, versionsJSON, upd.versionsJSON); err != nil {
+			return err
+		}
+	}
 	for t, db := range upd.dbs {
 		data, err := db.Encode(next.DBVersion)
 		if err != nil {
@@ -592,7 +643,7 @@ func prune(cfg Config, st state) (int, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
 	}
-	keep := map[string]bool{}
+	keep := map[string]bool{versionsJSON: true}
 	for _, e := range entries {
 		v, ok := versiondbFileVersion(e.Name())
 		if !ok {

@@ -2,6 +2,8 @@ package mirror
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -60,16 +62,26 @@ func (f *Fetcher) Size(ctx context.Context, url string) (int64, error) {
 	return size, err
 }
 
+// ErrChecksum is returned when a download does not match its expected hash.
+var ErrChecksum = errors.New("checksum mismatch")
+
 // Download writes url to dest through a temporary file, so dest is either
-// absent or complete.
-func (f *Fetcher) Download(ctx context.Context, url, dest string) error {
+// absent or complete. If sha256Hex is not empty, dest is only written when
+// the body hashes to it; a mismatch is retried like a network error.
+func (f *Fetcher) Download(ctx context.Context, url, dest, sha256Hex string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 	return f.do(ctx, http.MethodGet, url, func(r io.Reader) error {
 		return writeAtomic(dest, func(w io.Writer) error {
-			_, err := io.Copy(w, r)
-			return err
+			h := sha256.New()
+			if _, err := io.Copy(io.MultiWriter(w, h), r); err != nil {
+				return err
+			}
+			if got := hex.EncodeToString(h.Sum(nil)); sha256Hex != "" && !strings.EqualFold(got, sha256Hex) {
+				return fmt.Errorf("%s: %w: got sha256 %s, want %s", url, ErrChecksum, got, sha256Hex)
+			}
+			return nil
 		})
 	})
 }
