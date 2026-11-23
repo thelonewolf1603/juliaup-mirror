@@ -36,20 +36,20 @@ juliaup add lts
 
 `JULIAUP_SERVER` has to stay set (shell profile, `/etc/profile.d`, or similar) or juliaup goes back to the official server.
 
-juliaup only accepts `https://` servers, except `http://localhost` and `http://127.0.0.1`. `juliaup-mirror serve -dir /srv/julia` serves a mirror on localhost for testing.
+Serve the mirror over **https**: juliaup accepts plain `http://` only for localhost, and `install.sh` downloads over https only. A certificate from an internal CA works if the CA is in the client's system trust store. For a quick setup or a test, `juliaup-mirror serve -dir /srv/julia -addr :443 -tls-cert cert.pem -tls-key key.pem` serves the directory itself.
 
 ## Choosing what to mirror
 
 | Flag | Default | |
 |---|---|---|
 | `-channels` | `release,lts` | Channel names or globs: `1.11`, `1.10.*`, `beta`. `*` mirrors everything (several hundred GB). |
-| `-targets` | Linux x86_64/aarch64 (musl and gnu), macOS x86_64/aarch64, Windows x86_64 | juliaup target triples. |
+| `-targets` | Linux x86_64/aarch64 (musl and gnu), macOS x86_64/aarch64, Windows x86_64 (gnu and msvc) | juliaup target triples. |
 | `-arch-variants` | off | Also mirror the `~x86` / `~x64` variants of each channel (e.g. 32-bit Julia on a 64-bit host). |
 | `-juliaup-version` | upstream's current release | The juliaup release clients install and self-update to. |
 | `-macos-dmg` | off | Also mirror the `.dmg` juliaup tries before the `.tar.gz` on macOS. |
 | `-metadata-only` | off | Skip Julia archives, e.g. when a caching proxy in front of the mirror fetches `bin/` from upstream. |
 
-On Linux, juliaup's install script always installs the **musl** juliaup, which reads the `*-linux-musl` version database. Mirror both `-linux-musl` and `-linux-gnu` targets; they point at the same Julia archives, so the musl target costs only a few MB.
+On Linux, juliaup's install script always installs the **musl** juliaup, which reads the `*-linux-musl` version database. Mirror both `-linux-musl` and `-linux-gnu` targets; they point at the same Julia archives, so the musl target costs only a few MB. Likewise on Windows, the MSI installs the `-pc-windows-gnu` juliaup and the Store build is `-pc-windows-msvc`.
 
 ## How it works
 
@@ -74,13 +74,17 @@ upstream 1.0.104  ->  mirror 1.0.104000, 1.0.104001, ...   (one step per change 
 upstream 1.0.105  ->  mirror 1.0.105000
 ```
 
-so the mirror always sorts above the upstream version it came from and below the next one. State is kept in `.juliaup-mirror-state.json` in the mirror directory.
+so the mirror always sorts above the upstream version it came from, and every change on the mirror gets a higher number than the last. The next number is worked out from what is already published, not only from `.juliaup-mirror-state.json`, so a killed sync or a lost state file never republishes a number with different content.
 
-One side effect: a client that has used the mirror and then switches back to the official server keeps the mirror's database, because the official version number is lower. Delete `~/.julia/juliaup/versiondb-*.json` on that client to fix it.
+A mirror can be the `-upstream` of another one (say, an internet-facing mirror feeding an air-gapped one). Each level multiplies by 1000 again (`1.0.104006` → `1.0.104006000`), which leaves room for a few levels.
+
+**Side effect:** mirror numbers sort above any realistic official number, so a client that stops using the mirror keeps the mirror's channel list. Delete `~/.julia/juliaup/versiondb-*.json` on that client after unsetting `JULIAUP_SERVER`.
 
 ### Pruning
 
-Old version databases are always removed once they are two versions old. With `-prune`, Julia archives and juliaup binaries that the current selection no longer lists are deleted too.
+The current and the previous version databases are kept; older ones are removed. With `-prune`, Julia archives and juliaup binaries that neither of those two lists are deleted too, so a client that fetched the previous database a moment ago can still install from it.
+
+A sync holds a lock on the mirror directory, so overlapping cron runs fail fast instead of racing, and it removes partial downloads a killed run left behind. `-server-url` is remembered, so later runs keep `install.sh` up to date.
 
 ## Not supported (yet)
 
@@ -94,3 +98,7 @@ Old version databases are always removed once they are two versions old. With `-
 go test ./...
 go vet ./...
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
