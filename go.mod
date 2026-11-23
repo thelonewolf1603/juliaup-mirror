@@ -1,3 +1,3 @@
-module github.com/juliaup-mirror/juliaup-mirror
+module github.com/thelonewolf1603/juliaup-mirror
 
 go 1.24

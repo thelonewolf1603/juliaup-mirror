@@ -7,7 +7,7 @@ Build a mirror of the [juliaup](https://github.com/JuliaLang/juliaup) server, so
 ## Quick start
 
 ```sh
-go install github.com/juliaup-mirror/juliaup-mirror@latest
+go install github.com/thelonewolf1603/juliaup-mirror@latest
 
 # See what a mirror of release + lts would download
 juliaup-mirror sync -out /srv/julia -channels release,lts -dry-run

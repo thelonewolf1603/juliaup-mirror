@@ -13,7 +13,7 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/juliaup-mirror/juliaup-mirror/internal/mirror"
+	"github.com/thelonewolf1603/juliaup-mirror/internal/mirror"
 )
 
 const usage = `juliaup-mirror builds a static mirror of the juliaup server.
