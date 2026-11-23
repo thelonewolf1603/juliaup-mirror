@@ -121,11 +121,10 @@ func (f *Fetcher) retry(ctx context.Context, op func() error) error {
 	wait := f.Backoff
 	for attempt := 0; ; attempt++ {
 		err := op()
-		var perm permanent
-		if err == nil || errors.As(err, &perm) || attempt >= f.Retries {
-			if errors.As(err, &perm) {
-				return perm.error
-			}
+		if perm := (permanent{}); errors.As(err, &perm) {
+			return perm.error
+		}
+		if err == nil || attempt >= f.Retries || ctx.Err() != nil {
 			return err
 		}
 		select {

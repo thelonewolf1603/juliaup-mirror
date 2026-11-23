@@ -128,7 +128,9 @@ func TestSyncLifecycle(t *testing.T) {
 		t.Fatalf("no-op sync: %+v", res)
 	}
 
-	// Selection changed: new revision so clients refetch; old archive pruned.
+	// Selection changed: new revision so clients refetch. The lts archive
+	// stays while the previous versiondb still lists it.
+	lts := "bin/linux/x86_64/1.10/julia-1.10.14-linux-x86_64.tar.gz"
 	cfg := testConfig(t, srv, out, "release")
 	cfg.Prune = true
 	res, err = Sync(ctx, testFetcher(), cfg)
@@ -138,8 +140,8 @@ func TestSyncLifecycle(t *testing.T) {
 	if res.DBVersion != "1.0.104001" {
 		t.Fatalf("selection change: %+v", res)
 	}
-	if exists(out, "bin/linux/x86_64/1.10/julia-1.10.14-linux-x86_64.tar.gz") {
-		t.Error("lts archive not pruned")
+	if !exists(out, lts) {
+		t.Error("lts archive pruned while the previous versiondb lists it")
 	}
 	if !exists(out, "juliaup/versiondb/versiondb-1.0.104000-"+target+".json") {
 		t.Error("previous versiondb removed too early")
@@ -148,9 +150,12 @@ func TestSyncLifecycle(t *testing.T) {
 	// Upstream moved on: revision resets, versiondb two versions back goes.
 	up2 := newUpstream("1.0.105")
 	srv.Config.Handler = up2
-	res, err = Sync(ctx, testFetcher(), testConfig(t, srv, out, "release"))
+	res, err = Sync(ctx, testFetcher(), cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if exists(out, lts) {
+		t.Error("lts archive kept after no versiondb lists it")
 	}
 	if res.DBVersion != "1.0.105000" {
 		t.Fatalf("upstream bump: %+v", res)
@@ -202,5 +207,162 @@ func TestSyncDryRun(t *testing.T) {
 	entries, _ := os.ReadDir(out)
 	if len(entries) != 0 {
 		t.Errorf("dry run wrote %d entries", len(entries))
+	}
+}
+
+func TestSyncNeverReusesAVersionAfterACrash(t *testing.T) {
+	srv := httptest.NewServer(newUpstream("1.0.104"))
+	defer srv.Close()
+	out := t.TempDir()
+	ctx := context.Background()
+	if _, err := Sync(ctx, testFetcher(), testConfig(t, srv, out, "release", "lts")); err != nil {
+		t.Fatal(err)
+	}
+	// A sync killed after writing the pointers but before saving its state.
+	saved := read(t, out, stateFile)
+	res, err := Sync(ctx, testFetcher(), testConfig(t, srv, out, "release"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, stateFile), []byte(saved), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := res.DBVersion
+	res, err = Sync(ctx, testFetcher(), testConfig(t, srv, out, "lts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DBVersion == first || res.DBVersion != "1.0.104002" {
+		t.Errorf("published %s after %s; want a new, higher version", res.DBVersion, first)
+	}
+
+	// Losing the state file entirely must not reuse a version either.
+	if err := os.Remove(filepath.Join(out, stateFile)); err != nil {
+		t.Fatal(err)
+	}
+	res, err = Sync(ctx, testFetcher(), testConfig(t, srv, out, "release"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DBVersion != "1.0.104003" {
+		t.Errorf("without state: got %s, want 1.0.104003", res.DBVersion)
+	}
+}
+
+func TestSyncRefusesUpstreamGoingBackwards(t *testing.T) {
+	up := newUpstream("1.0.105")
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	out := t.TempDir()
+	if _, err := Sync(context.Background(), testFetcher(), testConfig(t, srv, out, "release")); err != nil {
+		t.Fatal(err)
+	}
+	srv.Config.Handler = newUpstream("1.0.104")
+	_, err := Sync(context.Background(), testFetcher(), testConfig(t, srv, out, "release"))
+	if err == nil || !strings.Contains(err.Error(), "backwards") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSyncRejectsBadJuliaupVersion(t *testing.T) {
+	for _, v := range []string{"<html>", "../../etc", "1.24"} {
+		up := newUpstream("1.0.104")
+		up.files["juliaup/RELEASECHANNELVERSION"] = v
+		srv := httptest.NewServer(up)
+		_, err := Sync(context.Background(), testFetcher(), testConfig(t, srv, t.TempDir(), "release"))
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "juliaup version") {
+			t.Errorf("%q: err = %v", v, err)
+		}
+	}
+}
+
+func TestSyncRemovesLeftoverTempFiles(t *testing.T) {
+	srv := httptest.NewServer(newUpstream("1.0.104"))
+	defer srv.Close()
+	out := t.TempDir()
+	partial := filepath.Join(out, "bin", "x", tmpPrefix+"julia.tar.gz-123")
+	if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partial, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Sync(context.Background(), testFetcher(), testConfig(t, srv, out, "release")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(partial); err == nil {
+		t.Error("partial download not removed")
+	}
+}
+
+func TestSyncLocksTheMirror(t *testing.T) {
+	srv := httptest.NewServer(newUpstream("1.0.104"))
+	defer srv.Close()
+	out := t.TempDir()
+	unlock, err := lock(filepath.Join(out, lockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	_, err = Sync(context.Background(), testFetcher(), testConfig(t, srv, out, "release"))
+	if err == nil || !strings.Contains(err.Error(), "another sync") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSyncRemembersServerURL(t *testing.T) {
+	srv := httptest.NewServer(newUpstream("1.0.104"))
+	defer srv.Close()
+	out := t.TempDir()
+	if _, err := Sync(context.Background(), testFetcher(), testConfig(t, srv, out, "release")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(out, "install.sh")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, srv, out, "release")
+	cfg.ServerURL = ""
+	if _, err := Sync(context.Background(), testFetcher(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(t, out, "install.sh"), "https://mirror.example.com/jl") {
+		t.Error("install.sh not rewritten with the remembered server URL")
+	}
+}
+
+func TestPlanWindowsTargets(t *testing.T) {
+	db, err := ParseVersionDB([]byte(sampleDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Upstream: "https://up", Targets: []string{"x86_64-pc-windows-gnu", "i686-pc-windows-msvc"}, MetadataOnly: true}
+	files, err := plan(cfg, map[string]*VersionDB{"x86_64-pc-windows-gnu": db, "i686-pc-windows-msvc": db}, "1.24.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.rel)
+		if !f.optional {
+			t.Errorf("%s should be optional", f.rel)
+		}
+	}
+	want := []string{"juliaup/winmsi/Julia-v1.24.0-x64.msi", "juliaup/winmsi/Julia-v1.24.0-x86.msi"}
+	if !equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestPlanRejectsEscapingURLPath(t *testing.T) {
+	for _, p := range []string{"../etc/passwd", "/etc/passwd", "bin/../../x", "https://evil/x", `bin\..\x`} {
+		db, err := ParseVersionDB([]byte(`{"AvailableVersions":{"1.0.0":{"UrlPath":"` + strings.ReplaceAll(p, `\`, `\\`) + `"}},"AvailableChannels":{"release":{"Version":"1.0.0"}},"Version":"1.0.1"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{Upstream: "https://up", Targets: []string{target}}
+		if _, err := plan(cfg, map[string]*VersionDB{target: db}, "1.24.0"); err == nil {
+			t.Errorf("%q accepted", p)
+		}
 	}
 }

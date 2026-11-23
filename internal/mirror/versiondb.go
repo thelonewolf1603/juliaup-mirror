@@ -212,6 +212,17 @@ func ParseDBVersion(s string) (DBVersion, error) {
 
 func (v DBVersion) String() string { return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch) }
 
+// Less reports whether v sorts before w.
+func (v DBVersion) Less(w DBVersion) bool {
+	if v.Major != w.Major {
+		return v.Major < w.Major
+	}
+	if v.Minor != w.Minor {
+		return v.Minor < w.Minor
+	}
+	return v.Patch < w.Patch
+}
+
 // maxRevisions is how many mirror revisions fit under one upstream version.
 const maxRevisions = 1000
 
@@ -219,12 +230,15 @@ const maxRevisions = 1000
 // and a mirror revision.
 //
 // juliaup only downloads a versiondb whose version is higher than the one it
-// has (bundled or cached). A filtered versiondb must therefore sort above the
-// upstream one it came from, or clients that saw upstream keep its full
-// channel list, and below the next upstream version, so an upstream release
-// still reaches the mirror's clients. Scaling the patch by maxRevisions does
-// both: upstream 1.0.104 becomes 1.0.104000, 1.0.104001, ... and 1.0.105
-// becomes 1.0.105000.
+// has (bundled or cached). A filtered versiondb must sort above the upstream
+// one it came from, or clients that saw upstream keep its full channel list,
+// and every change on the mirror needs a higher number than the last. Scaling
+// the patch by maxRevisions does both: upstream 1.0.104 becomes 1.0.104000,
+// 1.0.104001, ... and upstream 1.0.105 becomes 1.0.105000.
+//
+// The cost: mirror versions sort above every realistic upstream version, so
+// a client that leaves the mirror keeps the mirror's versiondb until its
+// cached copy is deleted.
 func MirrorDBVersion(upstream DBVersion, revision int) (DBVersion, error) {
 	if revision < 0 || revision >= maxRevisions {
 		return DBVersion{}, fmt.Errorf("mirror revision %d out of range [0, %d)", revision, maxRevisions)

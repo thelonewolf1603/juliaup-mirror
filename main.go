@@ -121,12 +121,22 @@ func runServe(args []string) error {
 	fl := flag.NewFlagSet("serve", flag.ExitOnError)
 	dir := fl.String("dir", "", "mirror directory (required)")
 	addr := fl.String("addr", "127.0.0.1:8080", "listen address")
+	cert := fl.String("tls-cert", "", "TLS certificate file (PEM); serves https")
+	key := fl.String("tls-key", "", "TLS key file (PEM)")
 	_ = fl.Parse(args)
 	if *dir == "" {
 		return errors.New("-dir is required")
 	}
-	log.Printf("serving %s on http://%s (juliaup accepts plain http only for localhost)", *dir, *addr)
-	return http.ListenAndServe(*addr, logRequests(http.FileServer(http.Dir(*dir))))
+	if (*cert == "") != (*key == "") {
+		return errors.New("-tls-cert and -tls-key go together")
+	}
+	h := logRequests(http.FileServer(http.Dir(*dir)))
+	if *cert != "" {
+		log.Printf("serving %s on https://%s", *dir, *addr)
+		return http.ListenAndServeTLS(*addr, *cert, *key, h)
+	}
+	log.Printf("serving %s on http://%s (juliaup accepts plain http only for localhost, and install.sh needs https)", *dir, *addr)
+	return http.ListenAndServe(*addr, h)
 }
 
 func logRequests(h http.Handler) http.Handler {
